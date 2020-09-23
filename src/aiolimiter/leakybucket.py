@@ -22,7 +22,7 @@ class AsyncLimiter(AsyncContextManagerBase):
                 # process foo elements at 10 items per minute
 
     :param max_rate: Allow up to `max_rate` / `time_period` acquisitions before
-       blocking.
+       overflowing.
     :param time_period: duration, in seconds, of the time period in which to
        limit the rate. Note that up to `max_rate` acquisitions are allowed
        within this time period in a burst.
@@ -73,12 +73,13 @@ class AsyncLimiter(AsyncContextManagerBase):
     async def acquire(self, amount: float = 1) -> None:
         """Acquire capacity in the limiter.
 
-        If the limit has been reached, blocks until enough capacity has been
+        If the limit has been reached, overflows until enough capacity has been
         freed before returning.
 
         :param amount: How much capacity you need to be available.
         :exception: Raises :exc:`ValueError` if `amount` is greater than
            :attr:`max_rate`.
+        :exception: Raises :`asyncio.CancelledError`: when overflowing. 
 
         """
         if amount > self.max_rate:
@@ -87,19 +88,10 @@ class AsyncLimiter(AsyncContextManagerBase):
         loop = get_running_loop()
         task = current_task(loop)
         assert task is not None
-        while not self.has_capacity(amount):
-            # wait for the next drip to have left the bucket
-            # add a future to the _waiters map to be notified
-            # 'early' if capacity has come up
-            fut = loop.create_future()
-            self._waiters[task] = fut
-            try:
-                await asyncio.wait_for(
-                    asyncio.shield(fut), 1 / self._rate_per_sec * amount, loop=loop
-                )
-            except asyncio.TimeoutError:
-                pass
-            fut.cancel()
+        if not self.has_capacity(amount):
+            task.cancel()
+            return None
+
         self._waiters.pop(task, None)
 
         self._level += amount
